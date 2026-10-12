@@ -20,7 +20,7 @@ Owners get a dashboard with live chat takeover, appointments, products with Stri
 |---|---|---|
 | 1 | [01-video-breakdown.md](01-video-breakdown.md) | The whole transcript, understood: features, original architecture, data model, AI logic, chapter map, what the video left unfinished |
 | 2 | [02-lovable-capabilities.md](02-lovable-capabilities.md) | What Lovable can do today (Cloud, Lovable AI, payments, email, connectors), how each original tool maps to it, the accounts you need, risks |
-| 3 | [03-project-knowledge.md](03-project-knowledge.md) | Paste into **Project settings → Knowledge** after Stage 1 (about 6k of the 10k-character limit) |
+| 3 | [03-project-knowledge.md](03-project-knowledge.md) | Paste into **Project settings → Knowledge** after Stage 1 (about 7k of the 10k-character limit) |
 | 4 | [04-build-prompts.md](04-build-prompts.md) | **22 copy-paste prompts, one per stage**, each with a "Done when" checklist |
 | 5 | [05-testing-and-debugging.md](05-testing-and-debugging.md) | End-to-end test script, debugging prompt templates, and the video's bugs and how this build avoids them |
 
@@ -53,5 +53,5 @@ Owners get a dashboard with live chat takeover, appointments, products with Stri
 ## Notes
 
 - The email marketing part was accidentally cut from the original video. Stage 18 designs it from the demo.
-- Prices and limits (Standard free with 1 domain; Pro $15 with 5; Ultimate $35, unlimited) are placeholders. Edit `plans.ts` and the Knowledge text together.
+- Prices and limits (Standard free with 1 domain; Pro $15 with 5; Ultimate $35, unlimited) are placeholders. Edit `plans.ts` and the Knowledge text together, and ask Lovable to update the mirrored limits in the domain-limit trigger and edge functions.
 - Lovable features and model names change often. Recheck [docs.lovable.dev](https://docs.lovable.dev) for anything flagged ⚠️ in file 02.

@@ -11,6 +11,7 @@ Rules that keep credits low and quality high:
 - Don't start the next stage until "Done when" passes. Use the debugging prompts in [`05-testing-and-debugging.md`](05-testing-and-debugging.md).
 - Paste [Project Knowledge](03-project-knowledge.md) right after Stage 1. Every prompt below assumes Lovable has it.
 - If Lovable asks a clarifying question, answer it. Don't just resend the prompt.
+- **Republish before testing.** Lovable doesn't push new code to your published site automatically. From Stage 9 on, many checks run on the published URL (`APP_URL`): the embed test page and widget, the bot's portal links, Stripe redirects, unsubscribe links and the blog's page source. So after each stage click **Publish → Publish changes**, then test. (The database is shared, so data you create in the preview is there too.)
 
 | # | Stage | Video equivalent | Mode |
 |---|---|---|---|
@@ -67,7 +68,7 @@ Create src/constants/plans.ts as the single source of truth for plans:
 Each plan also has a human-readable features[] list derived from its limits (e.g. "1 domain", "10 contacts", "10 emails per month", "Custom chatbot icon & greeting").
 
 Homepage "/" sections:
-1. Sticky navbar: logo (small orange bot icon + "AIChat"), links Home, Pricing, News Room, Features, Contact (smooth-scroll anchors), right side "Free Trial" orange button → /auth/sign-up. On mobile, links go into a slide-out sheet.
+1. Sticky navbar: logo (small orange bot icon + "AIChat"), links Home, Pricing, News Room, Features, Contact (smooth-scroll anchors, each with a real target: Home → top, Pricing → #pricing, News Room → #news, Features → #features = a section right after the hero with 6 icon cards: lead capture, qualifying questions, appointment booking, payments, live chat takeover, email marketing; Contact → #contact = the footer, which shows a contact email), right side "Free Trial" orange button → /auth/sign-up. On mobile, links go into a slide-out sheet.
 2. Hero: small orange pill badge "An AI powered sales assistant chatbot", large headline "Your AI powered sales assistant", sub text "Embed AIChat into any website with just a snippet of code!", primary button "Start For Free" → /auth/sign-up, and an illustration of a phone showing a chat widget conversation (generate it).
 3. Pricing (id="pricing"): heading "Choose what fits you right", short paragraph, 3 cards mapped from plans.ts. Card: name, description, price + "/month" (except Free), feature list with check icons, "Get started" button → /auth/sign-up. Ultimate card gets an orange border and a "Most popular" badge.
 4. News Room (id="news"): heading "News Room", sub text "Ideas and guides on using AI to grow your business.", a responsive grid of 3 placeholder blog cards (cover image, date, title, 2-line excerpt). Real posts come later.
@@ -89,13 +90,14 @@ Only the frontend for now — no auth, no database yet. Make it fully responsive
 
 **Goal:** the whole data model exists up front, so later stages don't fight migrations.
 **Mode:** **Plan → review → Approve.** Read the plan and check every table and policy.
+**Before you start:** a workspace owner/admin must open Workspace settings → Security → **Privacy & security** (Data protection) and turn **off** "Block public storage buckets". It's on by default on every plan and forces every new bucket to private, so the public image URLs used by the sidebar, widget, portal and blog would not load. (If the buckets were already created as private, ask Lovable to make them public.)
 
 ```text
 Set up the complete Lovable Cloud backend for AIChat using the data model in Project Knowledge. Don't build UI in this step.
 
 1. Enum plan_type ('standard','pro','ultimate'); enum app_role ('admin','user'); enum message_role ('user','assistant','owner'); enum account_type ('owner','student').
 
-2. Create every table listed in Project Knowledge with sensible types, NOT NULL where obvious, foreign keys with ON DELETE CASCADE from children to domains / customers / chat_rooms / campaigns, and these indexes: domains(user_id), chat_rooms(domain_id, last_message_at desc), chat_messages(room_id, created_at), customers(domain_id), bookings(domain_id, date), products(domain_id), payments(domain_id, created_at).
+2. Create every table listed in Project Knowledge with sensible types, NOT NULL where obvious, foreign keys with ON DELETE CASCADE from children to domains / customers / chat_rooms / campaigns / filter_questions (so deleting a filter question also deletes its customer_responses instead of failing), unique(customer_id, filter_question_id) on customer_responses and unique(campaign_id, customer_id) on campaign_customers (no duplicate rows, double emails or double credit charges), and these indexes: domains(user_id), chat_rooms(domain_id, last_message_at desc), chat_messages(room_id, created_at), customers(domain_id), bookings(domain_id, date), products(domain_id), payments(domain_id, created_at).
 
 3. Trigger on new auth user: insert profiles (full_name and account_type from signup metadata), subscriptions (plan 'standard', credits 10) and user_roles ('user').
 
@@ -106,16 +108,16 @@ Set up the complete Lovable Cloud backend for AIChat using the data model in Pro
 6. Security-definer helper functions (to avoid RLS recursion): has_role(user_id, role), owns_domain(domain_id) → boolean (domains.user_id = auth.uid()), owns_room(room_id), owns_customer(customer_id).
 
 7. Row Level Security ON for every table:
-   - profiles / subscriptions: user can select and update only their own row (subscriptions: select only — plan/credits are changed only by edge functions with the service role).
+   - profiles / subscriptions: user can select only their own row. profiles: the user may update only full_name and account_type on their own row (REVOKE UPDATE ON profiles FROM authenticated, then GRANT UPDATE (full_name, account_type) ON profiles TO authenticated — or a BEFORE UPDATE trigger that rejects changes to any other column unless the caller is the service role). stripe_account_id and stripe_charges_enabled are written only by edge functions with the service role. subscriptions: select only — plan/credits are changed only by edge functions with the service role.
    - domains: full CRUD only where user_id = auth.uid().
    - chatbots, help_desk, filter_questions, customers, products, bookings, payments, chat_rooms: CRUD only where owns_domain(domain_id).
    - customer_responses: via owns_customer(customer_id). chat_messages: select/insert/update via owns_room(room_id); owners may only insert role 'owner'.
    - campaigns / campaign_customers: owner only (campaigns.user_id = auth.uid()).
-   - blog_posts: anyone (anon) can select where published = true; only has_role(auth.uid(),'admin') can insert/update/delete.
+   - blog_posts: anyone (anon) can select where published = true; admins (has_role(auth.uid(),'admin')) can also select ALL posts including drafts; only admins can insert/update/delete.
    - user_roles: users can read their own roles; no client writes.
    - Anonymous visitors get NO direct table access (the widget/portal will use edge functions later).
 
-8. Storage buckets: domain-icons, bot-icons, product-images, blog-images (public read; authenticated users may upload only into a folder named after their user id), chat-uploads (public read by file URL, writes only via edge functions). Limit 2 MB and image/png, image/jpeg, image/webp.
+8. Storage buckets: domain-icons, bot-icons, product-images, blog-images (public read; authenticated users may upload only into a folder named after their user id), chat-uploads (public read by file URL; authenticated owners may upload only under {domainId}/{roomId}/… for a domain they own, i.e. owns_domain(((storage.foldername(name))[1])::uuid), because the inbox composer uploads directly; anonymous visitors write only via edge functions). Limit 2 MB and image/png, image/jpeg, image/webp.
 
 9. Enable Realtime for chat_messages and chat_rooms.
 
@@ -138,15 +140,15 @@ Show me the plan with the SQL for review before running it.
 ```text
 Build custom authentication pages with Lovable Cloud Auth (no third-party auth widgets).
 
-Shared auth layout for /auth/*: two columns on desktop. Left: logo + the form (max-w-md). Right (hidden on mobile): muted panel with heading "Hi, I'm your AI powered sales assistant, AIChat!", text "AIChat captures lead information without a single form.", and an app screenshot illustration. If a user is already signed in, redirect from /auth/* to /dashboard.
+Shared auth layout for /auth/*: two columns on desktop. Left: logo + the form (max-w-md). Right (hidden on mobile): muted panel with heading "Hi, I'm your AI powered sales assistant, AIChat!", text "AIChat captures lead information without a single form.", and an app screenshot illustration. If a user is already signed in, redirect from /auth/* to /dashboard, EXCEPT /auth/reset-password: the reset email (resetPasswordForEmail with redirectTo {window.location.origin}/auth/reset-password) signs the user in with a recovery session, and they must stay on that page to set the new password with updateUser({ password }).
 
 /auth/sign-up — a 3-step wizard with an orange 3-segment progress bar at the bottom (current/done segments orange, others muted):
 Step 1 "Create an account" — "Tell us about yourself! What do you do? Let's tailor your experience so it best suits you." Two selectable cards (custom radio cards with icon, title, description; selected = orange border + orange filled dot): "I own a business — Setting up my account for my company" (value owner, default) and "I am a student — Looking to learn about the tool" (value student). Button "Continue". Link "Already have an account? Sign In".
-Step 2 "Account details" — "Enter your email and password". Fields: Full name, Email, Confirm email, Password, Confirm password. zod: name required, valid email, emails must match, password 8–64 chars letters and numbers, passwords must match; show inline errors. Button "Continue" (disabled until valid) → call signUp with email/password and user metadata { full_name, account_type }. Show a toast on error (e.g. "Password has been found in a data breach" → readable message).
+Step 2 "Account details" — "Enter your email and password". Fields: Full name, Email, Confirm email, Password, Confirm password. zod: name required, valid email, emails must match, password 8–64 chars letters and numbers, passwords must match; show inline errors. Button "Continue" (disabled until valid) → call signUp with email/password and user metadata { full_name, account_type }. Show a toast on error (e.g. "Password has been found in a data breach" → readable message). If signUp returns no error but data.user.identities is an empty array, the email is already registered: toast "An account with this email already exists — please sign in" and do not go to the OTP step.
 Step 3 "Enter OTP" — "Enter the one-time password that was sent to your email." 6-slot OTP input (shadcn InputOTP). Button "Create account" → verifyOtp({ email, token, type: 'signup' }). On success go to /dashboard. Add "Resend code" (cooldown 60s).
 Keep all wizard state in one form (react-hook-form) + a small step context so Back keeps the values.
 
-/auth/sign-in — "Login", "You will receive a one time password" is NOT needed; use email + password with zod (valid email, password 8–64). Button "Submit" with spinner. "Forgot password?" → send reset email → /auth/reset-password page to set a new one. Link "Don't have an account? Create one".
+/auth/sign-in — heading "Login" with plain email + password (no one-time code on sign-in), validated with zod (valid email, password 8–64). If sign-in fails with "Email not confirmed" (error code email_not_confirmed), call supabase.auth.resend({ type: 'signup', email }) and show the same 6-digit OTP input (verifyOtp type 'signup') so the user can finish verifying. Button "Submit" with spinner. "Forgot password?" → send reset email → /auth/reset-password page to set a new one. Link "Don't have an account? Create one".
 
 Make sure a <Toaster /> is mounted at the app root. Protect all owner routes listed in Project Knowledge: unauthenticated users are redirected to /auth/sign-in. Update the navbar "Free Trial" button to go to /dashboard if logged in.
 ```
@@ -198,7 +200,7 @@ Implement domains.
 1. Hook src/hooks/use-domains.ts: loads the current user's domains (id, name, icon_url) ordered by created_at, and exposes addDomain({ name, iconFile }).
 2. The "+" in the sidebar DOMAINS group opens a bottom Drawer (shadcn Drawer) titled "Add your business domain" with description "Add in your domain address to integrate your chatbot". Form (react-hook-form + zod):
    - Domain: text input, placeholder "mydomain.com", min 4 chars, must match a domain regex (letters/numbers/hyphens with a TLD, no protocol, no slashes) → error "This is not a valid domain".
-   - Icon: custom upload button (hidden file input + label with an edit/upload icon, text "Upload Icon", hint "Recommended size 300px * 300px, less than 2MB"), image only, max 2 MB, show a preview.
+   - Icon: custom upload button (hidden file input + label with an edit/upload icon, text "Upload Icon", hint "Recommended size 300px * 300px, less than 2MB"), required, png/jpg/jpeg/webp only (the bucket rejects other types such as GIF/SVG), max 2 MB, inline zod errors, show a preview.
    - Button "Add Domain" with a loading spinner.
    On submit: upload the icon to the domain-icons bucket at {userId}/{uuid}.{ext}, get the public URL, insert the domain. If the database plan-limit trigger raises, show its message in a destructive toast; otherwise toast "Success — Domain successfully added", close the drawer, reset the form AFTER the upload finishes, and refresh the list.
 3. Sidebar DOMAINS list: each domain links to /settings/{domain name} and shows its icon (rounded) + name (name hidden when collapsed); highlight the active one. Empty state: small muted text "No domains yet".
@@ -241,12 +243,12 @@ Build /settings with three sections, each laid out as a 2-column grid on desktop
 Build the domain settings page at /settings/:domainName (look up the domain by name for the current user; if not found or not owned → redirect to /dashboard). Infobar title "Settings".
 
 Section "Domain Settings" (H2) with a separator, then:
-1. Domain name: input pre-filled with the current name (same validation as when adding). Saving renames it (reject if another domain already uses the name). After saving, navigate to the new URL /settings/{newName} and refresh the sidebar.
+1. Domain name: input pre-filled with the current name (same validation as when adding). Saving renames it. Names are unique per owner (unique(user_id, name), stored lowercase), not globally — never add a global unique constraint. Rely on that constraint and turn a duplicate-key error (code 23505) into the toast "Domain already exists". After saving, navigate to the new URL /settings/{newName} and refresh the sidebar.
 2. "Code snippet" — "Copy and paste this code snippet into the header tag of your website". Show a read-only code block (cream/muted background, monospace) containing:
    <script src="{APP_ORIGIN}/embed.js" data-bot-id="{domain.id}" async></script>
-   where APP_ORIGIN comes from window.location.origin (or an env var for the published URL; NO trailing slash). A copy icon button copies it and toasts "Copied to clipboard — You can now paste the code inside your website".
-3. "Chatbot Settings" with a "Premium" badge. Only for pro/ultimate plans; for standard show a locked card "Upgrade to Pro to customize your chatbot" with a link to /settings.
-   - "Chatbot icon" — current icon (or a default orange bot icon) + upload button "Edit image" (2 MB, png/jpg/webp) → bot-icons bucket → chatbots.icon_url.
+   where APP_ORIGIN = window.location.origin with NO trailing slash (secrets like APP_URL can't be read in the browser). The editor preview address requires a Lovable login, so a snippet copied there never works on customer sites: when the hostname contains "preview--" or ends with ".lovableproject.com", show a muted warning under the block: "This is a preview address — copy the snippet from your published app." A copy icon button copies it and toasts "Copied to clipboard — You can now paste the code inside your website".
+3. "Chatbot Settings" with a "Premium" badge. Only for pro/ultimate plans; for standard show a locked card "Upgrade to Pro to customize your chatbot" with a link to /settings. Enforce it server-side too: a BEFORE UPDATE trigger on chatbots raises "Upgrade to Pro to customize your chatbot" when the domain owner's plan is standard and welcome_message, icon_url, background_color, text_color or show_help_desk changed (IS DISTINCT FROM).
+   - "Chatbot icon" — current icon (or a default orange bot icon) + upload button "Edit image" (2 MB, png/jpg/webp) → bot-icons bucket at {userId}/{uuid}.{ext} (storage policies only allow the user's own folder) → public URL → chatbots.icon_url.
    - "Greeting message" — "Customize your welcome message", textarea (2 lines min), pre-filled from chatbots.welcome_message.
    - "Bot colors" — two color pickers: window background and text color (stored on chatbots), with a small live preview bubble.
    - "Show Help Desk tab" switch (chatbots.show_help_desk).
@@ -258,8 +260,8 @@ Leave room below for a "Bot Training" section (Stage 8) and a "Products" section
 ```
 
 **Done when:**
-- Rename, colour, greeting, icon and delete all persist.
-- The snippet has your real origin and no trailing slash.
+- Rename, colour, greeting, icon and delete all persist. Everyone is on Standard until Stage 17, so to test the Premium fields temporarily run `update subscriptions set plan = 'pro' where user_id = '<your user id>';` in Cloud → Database → SQL editor (your id is in Cloud → Users; set it back to `standard` afterwards).
+- The snippet has no trailing slash. In the editor preview it shows the preview warning; on the published app it uses your real origin (always copy it from there).
 - A Standard user sees the locked card.
 
 ---
@@ -277,8 +279,8 @@ Tab "Help Desk" (FAQ shown to visitors in the widget and used by the AI to answe
 - Right card: list of existing FAQs as an Accordion (question = trigger, answer = content, preserve line breaks). Each item has a delete (trash) button with confirm. Empty state "No Questions".
 
 Tab "Questions" (filter questions the AI must get answered to qualify leads):
-- Left card "Question": "Add a question that you want your chatbot to ask" (input) + "Create" button.
-- Right card: ordered list of questions with drag handles or up/down arrows to reorder (sort_order), and delete. Empty state "No Questions".
+- Left card "Question": "Add a question that you want your chatbot to ask" (input) + "Create" button. New questions get sort_order = current max + 1 (not the list length, which collides after a delete); reordering renumbers sort_order so every question keeps a distinct value.
+- Right card: ordered list of questions with drag handles or up/down arrows to reorder (sort_order), and delete. Empty state "No Questions". Delete asks for confirmation ("This also deletes the answers customers gave to it.") and must keep working after customers have answered: customer_responses.filter_question_id must reference filter_questions ON DELETE CASCADE (add a migration if it doesn't).
 - Small helper text: "Tip: ask qualifying questions like 'What's your budget?', 'Are you ready to start this month?'"
 
 Use one hook per tab (use-help-desk.ts, use-filter-questions.ts) that loads on mount and updates the list optimistically after create/delete, with toasts. On mobile the two cards stack.
@@ -298,19 +300,19 @@ Build the embeddable chatbot.
 
 A) Public edge function "chatbot-config" (no auth required, CORS open): input { domainId }. Returns { domainName, chatbot: { welcome_message, icon_url, background_color, text_color, show_help_desk }, helpDesk: [{question, answer}] } for that domain or 404. Uses the service role; never returns owner data.
 
-B) Route /chatbot?id=DOMAIN_ID — a standalone page with NO app layout, transparent page background (html/body background transparent), no auth. It renders only the widget:
+B) Route /chatbot?id=DOMAIN_ID — a standalone page with NO app layout, transparent page background (html/body background transparent), no auth. Always render this route in the light theme (ignore the app theme provider and the visitor's system dark mode) with color-scheme: normal on its <html>. Otherwise browsers paint an opaque box behind the transparent iframe on the host site when its color scheme differs from the iframe element's. It renders only the widget:
 - Closed state: a 64px round floating button bottom-right showing the bot icon (or default orange bot icon). Click → open.
-- Open state: a 380×620 window (full-screen on very small screens) with rounded corners, border and shadow, colored with the chatbot's background/text colors when set:
+- Open state: the window fills the whole iframe (w-full h-full). embed.js decides the size (see the resize rule below and C), so there is no fixed 380×620 size and no media query inside the widget. Rounded corners, border and shadow, colored with the chatbot's background/text colors when set:
   • Header: bot avatar with a green online dot, title "Sales Rep — {domainName without TLD}", subtitle "{domainName}", a close (chevron-down) button, and a "Real time" badge area (hidden for now).
   • Tabs: "Chat" and "Help Desk" (Help Desk tab only if show_help_desk).
   • Chat tab: scrollable message list (auto-scroll to bottom on new messages) starting with the welcome message as an assistant bubble. Bubbles: assistant left (muted, with bot avatar), user right (orange, with user icon), timestamp under each. URLs inside messages render as clickable links that open in a new tab (target _blank, rel noopener). Images render inline.
   • Composer: input "Type your message...", a paperclip button (file input, images only, 2 MB — wiring later), a send button. Enter sends. For now, sending just appends the user bubble locally and shows a "typing…" three-dot indicator for 1 second, then a placeholder assistant reply "(AI coming soon)".
   • Help Desk tab: "Help Desk — Browse from a list of questions people usually ask." + accordion of FAQs.
   • Footer: small muted text "Powered By AIChat".
-- Whenever the widget opens or closes, post a message to the parent window: window.parent.postMessage({ type: "aichat:resize", open: true|false, width, height }, "*") — closed = 80×80, open = 400×640 (or 100vw×100vh on mobile).
+- Whenever the widget opens or closes, post a message to the parent window: window.parent.postMessage({ type: "aichat:resize", open: true|false }, "*"). Never decide "mobile" or sizes inside the widget: its media queries and useIsMobile only see the iframe (80px wide when closed), not the visitor's screen. embed.js sizes the iframe: closed 80×80 at bottom/right 16px; open 380 × min(620, host window innerHeight − 32) px; full-screen (top/left/right/bottom 0, width/height 100%) when the host window is narrower than 480px. Re-apply on host window resize and restore the corner position on close. The open window always fills the iframe (w-full h-full).
 - Show a friendly error card if the id is missing/invalid.
 
-C) Static file public/embed.js (plain vanilla JS, no framework, no build step): reads data-bot-id from its own <script> tag (document.currentScript), derives the app origin from the script src, creates an <iframe> pointing to `${origin}/chatbot?id=${botId}` with style position:fixed; bottom:16px; right:16px; width:80px; height:80px; border:0; background:transparent; z-index:2147483647; color-scheme normal; allow="clipboard-write". Listen to window "message" events; only accept events whose event.origin === origin and data.type === "aichat:resize", then set the iframe width/height (with a short transition). Guard against loading twice.
+C) Static file public/embed.js (plain vanilla JS, no framework, no build step): reads data-bot-id from its own <script> tag (document.currentScript), derives the app origin from the script src, creates an <iframe> pointing to `${origin}/chatbot?id=${botId}` with style position:fixed; bottom:16px; right:16px; width:80px; height:80px; border:0; background:transparent; z-index:2147483647; color-scheme normal; allow="clipboard-write". Listen to window "message" events; only accept events whose event.origin === origin and data.type === "aichat:resize", then set the iframe width/height (with a short transition). Guard against loading twice. Read document.currentScript synchronously at the top of the script (it's null inside callbacks). The snippet goes in <head> with async, so document.body may not exist yet when it runs: if so, wait for DOMContentLoaded before appending the iframe.
 
 D) Create public/embed-test.html: a plain fake business website (heading, some lorem text) that includes <script src="/embed.js" data-bot-id="PASTE_DOMAIN_ID" async></script>, so I can test quickly.
 ```
@@ -331,17 +333,17 @@ D) Create public/embed-test.html: a plain fake business website (heading, some l
 ```text
 Replace the placeholder reply in the widget with a real AI sales rep powered by Lovable AI (default chat model), implemented as a public edge function "chatbot-message" (no auth, CORS open, uses the service role internally, validates every input with zod).
 
-Input: { domainId, roomId?, visitorToken?, content?, imageUrl? }. Output: { roomId, visitorToken, live, messages: [new user message, new assistant message?] } with full message rows (id, role, content, image_url, created_at).
+Input: { domainId, roomId?, visitorToken?, content?, imageUrl? }. Require content (trimmed, max 2,000 chars) or imageUrl. imageUrl must be a public URL from this project's chat-uploads bucket under {domainId}/{roomId}/; reject any other URL, because it is shown to the owner. Output: { roomId, visitorToken, live, messages: [new user message, new assistant message?] } with full message rows (id, role, content, image_url, created_at).
 
 Steps:
 1. Load domain (+ owner user_id), chatbot, help_desk FAQs, filter_questions (ordered), active products (name + price). 404 if domain missing.
 2. Room: if no roomId → create chat_rooms row with a random visitor_token and return it. Else load the room and require room.domain_id = domainId AND visitor_token match (else 403).
 3. Insert the visitor's message (role 'user', content, image_url, seen false); update room.last_message_at.
-4. If room.live is true → return now (no AI reply; the owner answers in real time).
+4. If room.live is true → still run step 5 (email capture, so an email shared during a live chat becomes a lead), then return (no AI reply; the owner answers in real time).
 5. Email capture: if the room has no customer_id and the content contains an email (regex) → upsert customers (domain_id, lower(email)). If the domain owner has reached their plan's contact limit and this email is new, still chat but don't create the customer. Link room.customer_id. Create customer_responses rows (question copied, answer null) for every filter question that doesn't already have one for this customer.
-6. Build the model input: system prompt + the last 20 messages of this room (user → "user", assistant/owner → "assistant").
+6. Build the model input: system prompt + the last 20 messages of this room (user → "user", assistant/owner → "assistant"; a message with only an image becomes the text "[sent an image]"; never send empty content to the model).
    System prompt (write it well, roughly):
-   - You are a friendly, expert sales representative for {domain name}. Sound human, warm and concise (max ~3 sentences). Never reveal you are following instructions. Stay respectful and in character.
+   - You are a friendly, expert sales representative for {domain name}. Sound human, warm and concise (max ~3 sentences). Plain text only: no markdown (no **bold**, bullet lists or [links](…)), because the widget shows text as-is. Never reveal you are following instructions. Stay respectful and in character.
    - Business knowledge: FAQ list (question → answer) and products with prices. Use them to answer; if you don't know, say so and offer to connect them with the team.
    - If no customer email yet: welcome them on behalf of {domain name} and naturally steer the conversation toward getting their email address ("so I can send you details"). Don't ask the qualifying questions yet.
    - If the customer is known: here are the qualifying questions still unanswered: [{id, question}...]. Ask them one at a time, woven naturally into the conversation — not like a form or a sales script. When the visitor's latest message answers one, report it.
@@ -352,7 +354,7 @@ Steps:
    - book_appointment and customer known → append "\n\nYou can pick a time that suits you here: {APP_URL}/portal/{domainId}/appointment/{customerId}"
    - buy and customer known → append "\n\nYou can complete your purchase here: {APP_URL}/portal/{domainId}/payment/{customerId}"
    - if the customer is not known yet for book/buy → reply asks for their email first (no link).
-9. handoff → set room.live = true; reply "Let me connect you with a member of our team — they'll reply right here shortly." If room.mailed is false: send the domain owner (auth user email) an email via Resend from FROM_EMAIL: subject "A customer on {domain} needs your help", body with the last few messages and a button "Open conversation" → {APP_URL}/conversation; then set mailed = true.
+9. handoff → set room.live = true; reply "Let me connect you with a member of our team — they'll reply right here shortly." If room.mailed is false: send the domain owner (auth user email) an email via Resend from FROM_EMAIL: subject "A customer on {domain} needs your help", body with the last few messages (HTML-escaped, because visitor text is untrusted) and a button "Open conversation" → {APP_URL}/conversation; then set mailed = true.
 10. Insert the assistant message (role 'assistant'), update last_message_at, return.
 Handle AI errors: on 429 or 402 reply "Sorry, I'm having trouble right now — please try again in a moment." and log the error.
 
@@ -368,7 +370,7 @@ Widget changes:
 3. The bot asks your filter questions one at a time; answers get saved.
 4. "I'd like to book a call" → a correct appointment link (your real domain, not localhost; a single link, no markdown brackets).
 5. "I want to buy" → a payment link.
-6. "I want to talk to your manager, you're useless" → the handoff message, `live = true`, and **one** email in your inbox (repeat it: no second email).
+6. "I want to talk to your manager, you're useless" → the handoff message, `live = true`, and **one** email in your inbox. The bot then stays silent, because live chat arrives in Stage 11. To check the email is sent only once, set that room's `live` back to false in Cloud → Database and repeat it: no second email.
 
 ---
 
@@ -384,21 +386,21 @@ Left pane:
 - Domain select (the owner's domains; default first).
 - Tabs: Unread (rooms with unseen visitor messages), All, Expired (no activity for 7+ days), Starred.
 - Room list (chat cards), newest activity first: avatar, customer email or "Anonymous visitor", last message preview (first 30 chars + "…", or "This chatroom is empty"), relative time ("2:45 PM" today, "Mon", or "12 Mar"), an orange "urgent" icon when the latest visitor message is unseen and newer than 2 hours, and a live green dot when room.live. Empty state: "No chats for your domain".
-- Hook use-conversations.ts loads rooms for the selected domain and subscribes to realtime changes on chat_rooms + chat_messages for that domain so the list re-sorts and badges update live.
+- Hook use-conversations.ts loads rooms for the selected domain and subscribes to realtime changes on chat_rooms filtered by domain_id=eq.{domainId} (chat_messages has no domain_id, so it can't be filtered by domain). On each room event, refetch that room's latest message so the list re-sorts and badges update live. Add a SECURITY DEFINER trigger AFTER INSERT on chat_messages that sets chat_rooms.last_message_at = NEW.created_at, so visitor, AI and owner messages all bump the room.
 
 Right pane (messenger):
 - Header shows the customer email; the infobar title area shows a "Real-time" Switch for the selected room (bound to chat_rooms.live; toast "Realtime mode enabled/disabled"). Star button in the infobar toggles chat_rooms.starred.
 - Message list with the same bubble component as the widget (visitor on the left, AI and owner on the right — owner bubbles orange with "You", AI bubbles muted with a bot icon), images inline, auto-scroll to bottom. When a room is opened, mark its visitor messages seen = true.
-- Composer: input + paperclip (image upload to chat-uploads at {domainId}/{roomId}/…) + send. Owner messages insert into chat_messages with role 'owner'. Disable the composer with a hint "Turn on Real-time to reply" when live is false.
+- Composer: input + paperclip (image upload to chat-uploads at {domainId}/{roomId}/…) + send. The chat-uploads storage policy must let authenticated owners upload when the first folder is a domain they own (owns_domain((storage.foldername(name))[1]::uuid)), with the same 2 MB and png/jpg/webp limits — add that INSERT policy if it is missing. Owner messages insert into chat_messages with role 'owner'. Disable the composer with a hint "Turn on Real-time to reply" when live is false.
 - Empty state: "No chat selected".
 
 Realtime:
 - Dashboard: subscribe to postgres changes on chat_messages filtered by room_id (RLS protects it).
-- Widget (anonymous): the visitor can't use RLS-protected subscriptions. Create a DB trigger that broadcasts every new chat_messages row to a Realtime broadcast topic "room:{room_id}" (Supabase "broadcast from database"); the widget subscribes to that topic using its roomId. If broadcast isn't available, fall back to polling "chatbot-history" every 3 seconds while the widget is open and room.live is true.
-- Also broadcast room live changes so the widget's "Real time" badge appears/disappears instantly.
+- Widget (anonymous): the visitor can't use RLS-protected subscriptions or private channels. Create a SECURITY DEFINER trigger AFTER INSERT on chat_messages that looks up the room's visitor_token and calls realtime.send(to_jsonb(NEW), 'new_message', 'room:' || visitor_token, false). The last argument false makes it a PUBLIC broadcast: realtime.broadcast_changes and private channels need a signed-in user, so with them the anonymous widget would silently get nothing. The widget subscribes to the public channel "room:{visitorToken}" (private: false). The topic is the secret token, not the room id, so nobody else can listen in or inject messages. If broadcast isn't available, fall back to polling "chatbot-history" while the widget is open: every 3 seconds when live, every 10 seconds otherwise, so the widget also notices when the owner turns Real-time on.
+- Also broadcast room live changes (SECURITY DEFINER trigger on chat_rooms UPDATE OF live, same public "room:{visitorToken}" topic, event "room_live") so the widget's "Real time" badge appears/disappears instantly. In the widget, show role 'owner' messages on the business side (left, like the bot) with a small "Team" label; only role 'user' bubbles go on the right.
 - IMPORTANT: append messages by id with dedupe (Map keyed by id) in BOTH the widget and the dashboard — the sender's own optimistic/returned message and the realtime echo must not show twice. Re-sort by created_at.
 
-Widget uploads: wire the paperclip to a public edge function "chatbot-upload" ({ domainId, roomId, visitorToken, file as base64 or signed upload URL }) that validates the token, type (png/jpg/webp) and size (2 MB), stores the image in chat-uploads/{domainId}/{roomId}/{uuid}.ext, then sends the message through chatbot-message with imageUrl. Upload FIRST, then reset the composer.
+Widget uploads: wire the paperclip to a public edge function "chatbot-upload" ({ domainId, roomId, visitorToken, file as base64 }) that validates the token, type (png/jpg/webp) and size (2 MB), stores the image in chat-uploads/{domainId}/{roomId}/{uuid}.ext and returns { imageUrl }. The widget then sends it through chatbot-message with imageUrl (content may be empty) and shows the returned rows. Keep the paperclip disabled until the first text message has created a room. Upload FIRST, then reset the composer.
 ```
 
 **Done when:**
@@ -418,12 +420,12 @@ Widget uploads: wire the paperclip to a public edge function "chatbot-upload" ({
 Build the public customer portal page /portal/:domainId/appointment/:customerId (no auth; minimal layout: top banner with the AIChat logo, centered content, mobile friendly).
 
 Data comes ONLY through public edge functions that validate the customer belongs to the domain:
-- "portal-data" { domainId, customerId } → { domainName, customerEmail, questions: [{ id, question, answer }], bookings: [{ date, slot }] for that domain from today onward, products (used later) }.
+- "portal-data" { domainId, customerId } → { domainName, customerEmail, questions: [{ id (the customer_responses row id), question, answer }], bookings: [{ date, slot }] for that domain from today onward, products: the domain's active products [{ id, name, image_url, price_cents }] (used later by the payment page) }. First create any missing customer_responses rows for filter questions the owner added after this customer was captured, so new questions show up too.
 - "portal-book" { domainId, customerId, answers: [{ id, answer }], date, slot } → saves answers (customer_responses), inserts bookings (unique constraint prevents double booking → return a friendly error "That slot was just taken"), returns ok.
 
 Steps with a 3-segment orange progress bar:
 1. "Account details" — "Please complete the questions below" — one textarea/input per filter question, pre-filled with any answer the bot already captured (editable). All required. "Next". If every question already has an answer, start at step 2 automatically (the visitor can still go back with "Edit Questions").
-2. "Book a meeting" — "Discovery call" + a one-line description of what the call covers (e.g. "A 30-minute call to understand your goals and see how we can help.") Left: shadcn Calendar (disable past dates). Right: grid of 30-minute slot cards from src/constants/time-slots.ts (9:00am–5:30pm). Slots already booked for that date are disabled/greyed; the selected slot is orange. Buttons "Edit Questions" (back) and "Book Now" (submit → portal-book; one save for answers + booking).
+2. "Book a meeting" — "Discovery call" + a one-line description of what the call covers (e.g. "A 30-minute call to understand your goals and see how we can help.") Left: shadcn Calendar (disable past dates). Send the picked day to portal-book as a plain 'YYYY-MM-DD' string from the visitor's local calendar date (date-fns format(date, 'yyyy-MM-dd')), never date.toISOString(), which shifts the day for visitors east of UTC. Right: grid of 30-minute slot cards from src/constants/time-slots.ts (9:00am–5:30pm). Slots already booked for that date are disabled/greyed; the selected slot is orange. Buttons "Edit Questions" (back) and "Book Now" (submit → portal-book; one save for answers + booking).
 3. Thank-you: "Thank you" + "Thank you for taking the time to fill in this form. We look forward to speaking to you soon." showing the booked date/time.
 Invalid domain/customer → "This link is invalid or expired."
 ```
@@ -442,7 +444,7 @@ Invalid domain/customer → "This link is invalid or expired."
 
 ```text
 Build /appointment for the owner (RLS-protected queries).
-Left (2/3 width): table "All appointments" with columns Name (customer email), Requested time (booking date + slot), Created (date the booking was made, with time), Domain. Sorted by upcoming first, past appointments greyed. Empty state "No appointments".
+Left (2/3 width): table "All appointments" with columns Name (customer email), Requested time (booking date + slot), Created (date the booking was made, with time), Domain. Sorted by upcoming first (by date, then by the slot's order in src/constants/time-slots.ts, not alphabetically, or "10:00am" sorts before "9:00am"), past appointments greyed. Empty state "No appointments".
 Right (1/3): "Bookings for Today" — cards for bookings whose DATE equals today's date in the user's timezone (compare dates, not timestamps): slot time, domain, customer email, avatar. Empty state "No appointments for today".
 Mobile: stack.
 ```
@@ -453,7 +455,7 @@ Mobile: stack.
 
 ## Stage 14 — Stripe Connect integration
 
-**Before you start:** Stripe test mode, with **Connect enabled and branding set** (Stage 0).
+**Before you start:** Stripe test mode, with **Connect enabled and branding set** (Stage 0). If you made a restricted key, it needs write access to Connect accounts (including account links and login links), Checkout Sessions, Customers, Products/Prices, Subscriptions and the customer portal, or calls fail with permission errors. The `sk_test_` secret key is simpler. Stripe sends you back to `APP_URL` (the published site), so **publish** first and run this stage's test while signed in on the published site: the editor preview is a different origin with its own login.
 **Goal:** each business connects its own Stripe account (an Express account) so customers pay them directly.
 **Mode:** **Plan → review → Approve.**
 
@@ -466,6 +468,7 @@ Add payments using MY OWN Stripe account (not Lovable built-in payments) — I'l
 4. Edge function "stripe-connect-status" (auth required): retrieves the account, updates profiles.stripe_charges_enabled from account.charges_enabled, returns { connected, chargesEnabled, detailsSubmitted }. Call it when /integration loads and when returning with ?stripe=return.
 5. Button states: not connected → "Connect"; onboarding incomplete → "Finish setup" (new account link); charges enabled → "Connected" (disabled) + small "Open Stripe dashboard" link via stripe.accounts.createLoginLink.
 Show clear toasts on errors (e.g. if Stripe says Connect branding/icon is missing, show that message).
+Security: only these edge functions (service role) write profiles.stripe_account_id and profiles.stripe_charges_enabled. The browser must not be able to change those two columns (profile updates from the client are limited to full_name and account_type) — check this and add a migration if it is not the case.
 ```
 
 **Done when:**
@@ -482,7 +485,7 @@ Show clear toasts on errors (e.g. if Stripe says Connect branding/icon is missin
 ```text
 On /settings/:domainName add a "Products" section below Bot Training: heading "Products", text "Add products to your store and set them live to accept payments from your customers."
 - Tabs: All products, Live, Deactivated (filter by products.active) and on the right an "Add Product" button with a plus icon.
-- "Add Product" opens a right-side Sheet "Add a product" — "Add products to your store and set them live to accept payments from your customers." Form: Product name (required), Product image (upload to product-images bucket, 2 MB), Price (number > 0, in dollars → stored as price_cents). Button "Create Product" with spinner. Toast and reset after success.
+- "Add Product" opens a right-side Sheet "Add a product" — "Add products to your store and set them live to accept payments from your customers." Form: Product name (required), Product image (upload to the product-images bucket at {userId}/{uuid}.{ext}, the owner's own folder that the storage policy requires; 2 MB, png/jpg/webp), Price (in dollars, at least 0.50 because Stripe rejects smaller charges → stored as price_cents = Math.round(price * 100)). New products start active (Live). Button "Create Product" with spinner. Toast and reset after success.
 - Table: Featured image (thumbnail), Name, Pricing ($), Created (date), Active switch, delete (confirm).
 - If the owner hasn't connected Stripe yet (profiles.stripe_charges_enabled false), show a small warning banner "Connect Stripe in Integrations to accept payments" linking to /integration.
 ```
@@ -504,11 +507,11 @@ Steps with the 3-segment progress bar:
 2. "Payment": order summary — every ACTIVE product of the domain as a card (image, name, price) and the Total. Button "Pay {total}" → public edge function "portal-checkout" { domainId, customerId } which:
    - loads the domain owner's profiles.stripe_account_id (error "This business can't accept payments yet" if missing or charges not enabled),
    - sums active product prices server-side (never trust the client),
-   - creates a Stripe Checkout Session (mode 'payment', ui_mode 'embedded' preferred, else hosted) with line_items per product (price_data, currency 'usd'), customer_email = customer's email, payment_intent_data: { transfer_data: { destination: stripe_account_id }, application_fee_amount: 0 } (keep fee configurable via a PLATFORM_FEE_PERCENT secret, default 0), metadata { domain_id, customer_id }, return/success URL {APP_URL}/portal/{domainId}/payment/{customerId}?session_id={CHECKOUT_SESSION_ID}, cancel URL back to step 2,
+   - creates a Stripe Checkout Session (mode 'payment', ui_mode 'embedded_page', else hosted; Stripe API version 2026-03-25 renamed 'embedded' to 'embedded_page', so use the value that matches the apiVersion the function pins) with line_items per product (price_data, currency 'usd'), customer_email = customer's email, payment_intent_data: { transfer_data: { destination: stripe_account_id } } plus application_fee_amount only when the fee is above 0 (fee from an optional PLATFORM_FEE_PERCENT secret, default 0), metadata { domain_id, customer_id }, return_url {APP_URL}/portal/{domainId}/payment/{customerId}?session_id={CHECKOUT_SESSION_ID} (embedded sessions take only return_url: Stripe rejects success_url and cancel_url there, so the page's own "Back" button returns to step 2; if hosted, use success_url = that URL and cancel_url = the payment page),
    - inserts a payments row with status 'pending' and the session id, returns clientSecret (embedded) or url (hosted).
-   Render Stripe Embedded Checkout inside the page (@stripe/react-stripe-js EmbeddedCheckoutProvider with the publishable key) or redirect if hosted.
+   Render Stripe Embedded Checkout inside the page (@stripe/react-stripe-js EmbeddedCheckoutProvider + loadStripe from @stripe/stripe-js, browser only) with my publishable key (pk_test_…), which I'll add as the secret STRIPE_PUBLISHABLE_KEY; portal-checkout returns it with the clientSecret (a pk_ key is public; STRIPE_SECRET_KEY never leaves the function). Redirect instead if hosted.
 3. On return with session_id → public edge function "portal-confirm" retrieves the session, verifies payment_status === 'paid' and metadata matches, marks the payment row 'paid' (amount, currency, customer email), then shows step 3: "Thank you" + "Your payment was successful."
-Also add an edge function "stripe-webhook" (verifies STRIPE_WEBHOOK_SECRET) handling checkout.session.completed to mark payments paid even if the visitor closes the tab — tell me which URL and events to register in the Stripe dashboard.
+Also add a PUBLIC edge function "stripe-webhook" (JWT verification OFF, because Stripe sends no auth header; verify the raw body from req.text() with await stripe.webhooks.constructEventAsync(body, signature, STRIPE_WEBHOOK_SECRET, undefined, Stripe.createSubtleCryptoProvider()), because the sync constructEvent fails in Deno) handling checkout.session.completed to mark payments paid even if the visitor closes the tab — tell me which URL and events to register in the Stripe dashboard.
 ```
 
 **Done when:**
@@ -528,10 +531,10 @@ Wire the "Upgrade" card on /settings to real subscriptions using my Stripe accou
 
 1. Create (with my approval) two recurring Stripe prices: Pro $15/month and Ultimate $35/month; store the price ids in plans.ts (or secrets STRIPE_PRICE_PRO / STRIPE_PRICE_ULTIMATE).
 2. Upgrade modal (Dialog "Choose a plan" — "Tell us about yourself! What do you do? Let's tailor your experience so it best suits you."): three selectable plan cards (radio style, current plan pre-selected and marked "Current"). Selecting Pro/Ultimate shows a "Continue to payment" button.
-3. Edge function "create-subscription-checkout" (auth): finds/creates the Stripe customer for the user (save stripe_customer_id), creates a Checkout Session mode 'subscription' with the chosen price, success_url {APP_URL}/settings?upgraded=1, cancel_url {APP_URL}/settings.
-4. Edge function "sync-subscription" (auth): looks up the customer's active subscription in Stripe, maps price → plan, and updates subscriptions (plan, stripe_subscription_id, current_period_end). When the plan changes upward, set credits to the new plan's monthly emailCredits. If no active subscription → plan 'standard'. Call it on /settings load and after returning from checkout; toast "Success — Your plan is now Pro".
-5. "Manage subscription" button for paid plans → Stripe customer portal session (cancel/switch plans), then sync on return.
-6. Add the subscription events (customer.subscription.created/updated/deleted, invoice.paid) to the existing stripe-webhook function so plan and credits stay correct even without visiting /settings. On invoice.paid (renewal) reset credits to the plan's monthly amount.
+3. Edge function "create-subscription-checkout" (auth): finds/creates the Stripe customer for the user (save stripe_customer_id), creates a Checkout Session mode 'subscription' with the chosen price, success_url {APP_URL}/settings?upgraded=1, cancel_url {APP_URL}/settings. If the user already has an active subscription, don't create a second one: return a customer-portal session URL instead (plan switches happen there).
+4. Edge function "sync-subscription" (auth): looks up the customer's active subscription in Stripe, maps price → plan, and updates subscriptions (plan, stripe_subscription_id, current_period_end). Read the period end from subscription.items.data[0].current_period_end (Stripe API 2025-03-31.basil and later removed subscription.current_period_end) and guard against a missing value so the function never throws "Invalid time value". When the plan changes upward, set credits to the new plan's monthly emailCredits. If no active subscription → plan 'standard'. Call it on /settings load and after returning from checkout; toast "Success — Your plan is now Pro".
+5. "Manage subscription" button for paid plans → Stripe customer portal session (cancel/switch plans), then sync on return. The portal must be activated once in the Stripe dashboard (Settings → Billing → Customer portal: allow cancelling and switching between the Pro and Ultimate prices) — tell me exactly what to set. (It doesn't work inside the Lovable preview panel; I'll test it in a separate tab or the published app.)
+6. Add the subscription events (customer.subscription.created/updated/deleted, invoice.paid) to the existing stripe-webhook function so plan and credits stay correct even without visiting /settings. Find the user by the event's Stripe customer id (subscriptions.stripe_customer_id) and reuse the sync-subscription logic for that customer; don't read invoice.subscription (newer API versions moved it to invoice.parent.subscription_details.subscription). The existing checkout.session.completed handler must ignore sessions with mode 'subscription' (they have no payments row) and still return 200. Tell me which events to add to the webhook endpoint in the Stripe dashboard. On invoice.paid (renewal) reset credits to the plan's monthly amount.
 7. Update the domain-limit trigger and the contact-limit check to read the plan from subscriptions (pro 5 domains, ultimate unlimited).
 8. Billing card: once on a paid plan show the gradient card with the plan name and features, and the renewal date.
 ```
@@ -539,7 +542,7 @@ Wire the "Upgrade" card on /settings to real subscriptions using my Stripe accou
 **Done when:**
 - Upgrading with the test card switches you to Pro (or Ultimate), and the features and credits update.
 - You can add more domains.
-- Cancelling in the portal brings you back to Standard after sync or the webhook.
+- Cancelling in the portal brings you back to Standard after sync or the webhook. (By default the portal cancels at the end of the billing period, so the plan stays Pro until the renewal date; to test the downgrade now, cancel the subscription immediately in the Stripe dashboard.)
 
 ---
 
@@ -554,13 +557,13 @@ Build /email-marketing (owner only).
 Layout: 2 columns on desktop.
 Top right of the page: a badge "{credits} credits" from subscriptions.credits (live-updated after sends).
 
-Left — "Leads" table of all customers across the owner's domains: checkbox, Email, Domain, Answers ("View" button opens a Dialog listing each filter question and the customer's answer or "—"), Unsubscribed badge if customers.unsubscribed. Search by email and filter by domain. Selecting rows enables "Add to campaign" (choose a campaign in a popover).
+Left — "Leads" table of all customers across the owner's domains: checkbox, Email, Domain, Answers ("View" button opens a Dialog listing each filter question and the customer's answer or "—"), Unsubscribed badge if customers.unsubscribed. Search by email and filter by domain. Selecting rows enables "Add to campaign" (choose a campaign in a popover). Leads already in that campaign are skipped (upsert on (campaign_id, customer_id) with ignoreDuplicates, since that pair is unique), then toast "{n} leads added".
 
 Right — Campaigns:
 - "Create campaign" button → Dialog with Campaign name → create.
 - Campaign cards: name, created date, "{n} customers added", selected card has an orange border. Each card has actions: "Edit email" and "Send".
 - "Edit email" → Dialog/Sheet with Subject and Body (simple rich-text editor or textarea with a live HTML preview). Support placeholders {{email}} and {{domain}}. Save to campaigns.subject / template_html.
-- "Send" → confirm dialog "Send to {n} customers? This uses {n} credits." → edge function "send-campaign" (auth): verifies ownership; skips unsubscribed customers and ones already sent (campaign_customers.sent_at); checks credits >= recipients else error "Not enough credits — upgrade your plan"; sends one email per recipient through Resend from FROM_EMAIL (batch API if available, otherwise loop with small delay) with the template placeholders filled and an unsubscribe footer link {APP_URL}/unsubscribe?c={customer_id}&t={signed token}; marks sent_at; decrements credits by the number actually sent (atomically, in SQL); returns { sent, skipped }. Toast "Campaign sent to {sent} customers".
+- "Send" → confirm dialog "Send to {n} customers? This uses {n} credits." → edge function "send-campaign" (auth): verifies the caller owns the campaign AND that every recipient customer belongs to one of the caller's domains (campaign_customers RLS only checks the campaign); skips unsubscribed customers and ones already sent (campaign_customers.sent_at); checks credits >= recipients else error "Not enough credits — upgrade your plan"; sends one email per recipient through Resend from FROM_EMAIL (batch API if available, otherwise loop with small delay) with the template placeholders filled and an unsubscribe footer link {APP_URL}/unsubscribe?c={customer_id}&t={token} (token = HMAC-SHA256 of customer_id keyed with a new UNSUBSCRIBE_SECRET secret, any long random string — ask me to add it; the /unsubscribe edge function recomputes it and compares in constant time); marks sent_at; decrements credits by the number actually sent (atomically, in SQL); returns { sent, skipped }. Toast "Campaign sent to {sent} customers".
 - Public page /unsubscribe: verifies the token via an edge function, sets customers.unsubscribed = true, shows "You've been unsubscribed."
 Empty states: "No leads yet — they appear when visitors share their email with your chatbot." / "No campaigns yet".
 ```
@@ -607,15 +610,15 @@ Skeleton loaders while loading.
 Build an SEO blog with the blog_posts table.
 - Make me an admin: tell me the SQL to insert my user id into user_roles with role 'admin' (I'll run it in the SQL editor).
 - /admin/blog (admin only, inside the owner layout, extra sidebar item only visible to admins): list posts (title, status, date) with "New post". Editor page: title, slug (auto from title, editable, unique), excerpt, cover image upload (blog-images bucket), rich-text content (headings, bold, links, lists, images) stored as sanitized HTML, Published switch, published_at. Preview button.
-- Public /blog: grid of published posts (cover, date like "May 28, 2024", title, excerpt) sorted newest first. Public /blog/:slug: cover, title, date, rendered content (sanitize HTML with DOMPurify, styled with Tailwind typography prose classes, images rounded and full width), back link.
+- Public /blog: grid of published posts (cover, date like "May 28, 2024", title, excerpt) sorted newest first. Public /blog/:slug: cover, title, date, rendered content (sanitize the HTML on the server with a sanitizer that doesn't need a browser DOM, e.g. sanitize-html — plain DOMPurify breaks server rendering — so the post body is in the server-rendered HTML; styled with Tailwind typography prose classes, images rounded and full width), back link.
 - The landing page "News Room" section shows the 3 latest published posts (cards link to /blog/:slug).
-- SEO: unique <title>, meta description, canonical URL, og:title/og:description/og:image per post; JSON-LD BlogPosting on post pages; add /blog and every published post to sitemap.xml; robots.txt allows everything except /dashboard, /settings, /conversation, /admin, /portal, /chatbot.
+- SEO: unique <title>, meta description, canonical URL, og:title/og:description/og:image per post; JSON-LD BlogPosting on post pages; serve sitemap.xml from a server route generated at request time from published blog_posts (plus / and /blog), so new posts appear without a code change; robots.txt allows everything except /dashboard, /settings, /conversation, /admin, /portal, /chatbot.
 ```
 
 **Option B — keep WordPress:** connect the **WordPress (self-hosted)** connector (site URL, username, application password), then:
 
 ```text
-Use the WordPress connector as a headless CMS: fetch published posts (with featured media URL and author name) from wp/v2/posts server-side, render /blog and /blog/:id like the built-in option (sanitized HTML with DOMPurify, prose styling, per-post meta/OG tags, sitemap entries), and show the 3 latest on the landing page News Room. Cache responses for 5 minutes.
+Use the WordPress connector as a headless CMS: fetch published posts (with featured media URL and author name) from wp/v2/posts server-side, render /blog and /blog/:slug like the built-in option (look the post up by its WordPress slug; sanitize the HTML on the server with sanitize-html, not DOMPurify, so the post body is in the server-rendered HTML; prose styling, per-post meta/OG tags; sitemap.xml generated at request time from the published posts), and show the 3 latest on the landing page News Room. Cache responses for 5 minutes.
 ```
 
 **Done when:**
@@ -630,7 +633,7 @@ Use the WordPress connector as a headless CMS: fetch published posts (with featu
 
 ```text
 Do a production-readiness pass, then summarize what you changed:
-1. Run the security scan and fix all findings. Double-check: RLS on every table; the widget/portal edge functions can only touch rows for the given domain and token/customer; no secrets in client code; storage write policies limited to the owner's folder; rate-limit chatbot-message per room/IP (e.g. 20 messages/minute) to protect AI credits.
+1. Run the security scan and fix all findings. Double-check: RLS on every table; the widget/portal edge functions can only touch rows for the given domain and token/customer; no secrets in client code; storage write policies limited to the owner's own folder ({userId}/… in domain-icons, bot-icons, product-images and blog-images; in chat-uploads, {domainId}/… of a domain the user owns, which the inbox composer needs, so keep that policy); rate-limit chatbot-message per room/IP (e.g. 20 messages/minute) to protect AI credits.
 2. Every page: loading skeletons, empty states, error states with retry; consistent toasts.
 3. Dark mode audit: find any hard-coded colors and replace them with semantic tokens (sidebar, cards, chat bubbles, code snippet block).
 4. Mobile audit at 375px: sidebar, conversations (list → detail with back button), tables scroll horizontally, portal steps.

@@ -21,13 +21,13 @@ AIChat is a multi-tenant SaaS: an AI "sales rep" chatbot that businesses embed o
 - Brand: orange accent (#F97316 family), warm cream background (#FDF8F3) in light mode, near-black in dark. Light/dark/system theme. ALWAYS use semantic tokens (bg-background, text-foreground, bg-muted, border, primary...), never hard-coded colors, so dark mode works.
 - Forms: react-hook-form + zod; reuse one <FormField> style everywhere. Toast on every success/error.
 - Every list/page has loading (skeleton), empty and error states. Check array.length, never truthiness of an array.
-- Never call AI, Stripe or Resend from the browser. Only from edge functions using secrets.
-- Secrets: STRIPE_SECRET_KEY, RESEND_API_KEY, APP_URL (public base URL of the app), FROM_EMAIL. LOVABLE_API_KEY is automatic.
+- Never call AI, Stripe or Resend APIs with secret keys from the browser — only from edge functions using secrets. (Stripe.js with the publishable key for Embedded Checkout is allowed.)
+- Secrets: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_PUBLISHABLE_KEY (pk_, returned to the browser only for Embedded Checkout), RESEND_API_KEY, APP_URL (public base URL of the app), FROM_EMAIL, UNSUBSCRIBE_SECRET; optional PLATFORM_FEE_PERCENT, STRIPE_PRICE_PRO, STRIPE_PRICE_ULTIMATE. LOVABLE_API_KEY is automatic.
 - Build every public link (portal links, embed snippet) from APP_URL / window.location.origin. Never hard-code localhost or lovable preview URLs.
-- Uploads: max 2 MB, png/jpg/jpeg/webp.
+- Uploads: max 2 MB, png/jpg/jpeg/webp. Object path inside the bucket (never prefixed with the bucket name): owner uploads use {userId}/{uuid}.{ext} (storage policies require the user-id folder); chat images in chat-uploads use {domainId}/{roomId}/{uuid}.{ext}.
 - Mobile-first, responsive; sidebar collapses.
 
-## Plans (single source of truth: src/constants/plans.ts + enum plan = 'standard' | 'pro' | 'ultimate')
+## Plans (single source of truth: src/constants/plans.ts + enum plan_type = 'standard' | 'pro' | 'ultimate'; the domain-limit trigger and the edge functions keep mirrored copies of the limits, so change them all together)
 | plan     | price  | domains   | contacts | email credits / month | bot customization |
 | standard | Free   | 1         | 10       | 10                    | no                |
 | pro      | $15/mo | 5         | 50       | 50                    | yes               |
@@ -38,7 +38,7 @@ Display names: "Standard", "Pro", "Ultimate". Enforce limits server-side (DB tri
 - profiles(id = auth.users.id, full_name, account_type 'owner'|'student', stripe_account_id, stripe_charges_enabled bool)
 - user_roles(user_id, role 'admin'|'user')  -- roles never stored on profiles
 - subscriptions(user_id PK, plan, credits int, stripe_customer_id, stripe_subscription_id, current_period_end)
-- domains(id, user_id, name unique, icon_url)
+- domains(id, user_id, name (stored lowercase), icon_url) unique(user_id, name)  -- unique per owner, not global
 - chatbots(id, domain_id unique, welcome_message, icon_url, background_color, text_color, show_help_desk bool)
 - help_desk(id, domain_id, question, answer)
 - filter_questions(id, domain_id, question, sort_order)
